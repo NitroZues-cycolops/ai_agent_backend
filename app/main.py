@@ -94,7 +94,7 @@ app.include_router(api_router, prefix="/api")
 from app.routers import frontend
 frontend_router = APIRouter()
 frontend_router.include_router(frontend.router, tags=["frontend"])
-app.include_router(frontend_router, prefix="/api/v1", include_in_schema=False)
+app.include_router(frontend_router, prefix="/api/v1")
 
 
 @app.get("/")
