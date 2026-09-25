@@ -29,7 +29,7 @@ class TeamModel(BaseModel):
     pass2Verdict: Optional[list[str]] = None
     critique: Optional[dict[str, Any]] = None
     evidenceLinks: Optional[list[dict[str, Any]]] = None
-    integrityFlags: Optional[list[str]] = None
+    integrityFlags: Optional[list[Any]] = None
     finalRank: Optional[int] = None
     overrideScore: Optional[float] = None
     auditorId: Optional[str] = None
