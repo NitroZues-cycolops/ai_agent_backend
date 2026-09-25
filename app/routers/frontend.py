@@ -72,6 +72,8 @@ def get_current_run_frontend(session: Session = Depends(get_session)):
 # 2. POST /runs/current/restart (and /restart)
 @router.post("/runs/current/restart", response_model=RunState)
 @router.post("/restart", response_model=RunState)
+@router.post("/runs/current/unfreeze", response_model=RunState)
+@router.post("/unfreeze", response_model=RunState)
 def restart_run_frontend(
     body: Optional[RestartPayload] = None,
     session: Session = Depends(get_session)
