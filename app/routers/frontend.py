@@ -1,12 +1,10 @@
 """Frontend-specific API router for the Next.js frontend adapter."""
 import json
 import logging
-from typing import Optional, Any
-from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
-from sqlmodel import Session, select, func, or_
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlmodel import Session, select, func
 
 from app.database import get_session
 from app.models import Team, Run, AuditLog, TeamStatus, RunStatus, utcnow
@@ -14,411 +12,42 @@ from app.routers.runs import latest_run
 from app.ingest import parse_rows, ingest_rows, missing_columns
 from app.sheets import get_sheet_rows
 
+# Re-export all schemas for backwards compatibility with mock.patch
+from app.routers.frontend_schemas import (
+    Pass1ScoreModel,
+    TeamModel,
+    TeamsResponse,
+    FreezeSummary,
+    FreezeStatus,
+    FreezeResponse,
+    FreezePayload,
+    OverridePayload,
+    OverrideResponse,
+    Pass1Bucket,
+    Pass1RecentActivity,
+    Pass1StatsResponse,
+    Pass2StreamProgress,
+    Pass2StatsResponse,
+    DisputeItem,
+    IncompleteTeamSummary,
+    IngestResult,
+    RunState,
+    RestartPayload,
+)
+
+# Re-export all serializers for backwards compatibility
+from app.routers.frontend_serializers import (
+    ensure_utc,
+    format_iso_utc,
+    team_to_frontend,
+    map_run_status,
+    map_current_stage,
+    build_run_state,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-# ============================================================================
-# Request / Response Schemas matching API_CONTRACT.md and src/types/
-# ============================================================================
-
-class Pass1ScoreModel(BaseModel):
-    problemClarity: float
-    originality: float
-    execution: float
-    feasibility: float
-    articulation: float
-    composite: float
-    reasons: dict[str, str] = Field(default_factory=dict)
-    track: str
-    band: str
-
-
-class TeamModel(BaseModel):
-    id: str
-    name: str
-    theme: Optional[str] = None
-    idea: str
-    track: str
-    projectLinks: list[str] = Field(default_factory=list)
-    memberCount: Optional[int] = None
-    status: str
-    pass1: Optional[Pass1ScoreModel] = None
-    pass2Score: Optional[float] = None
-    pass2Verdict: Optional[list[str]] = None
-    critique: Optional[dict[str, Any]] = None
-    evidenceLinks: Optional[list[dict[str, Any]]] = None
-    integrityFlags: Optional[list[str]] = None
-    finalRank: Optional[int] = None
-    overrideScore: Optional[float] = None
-    auditorId: Optional[str] = None
-    auditorNote: Optional[str] = None
-    incompleteReasons: Optional[list[str]] = None
-    createdAt: str
-    updatedAt: str
-
-
-class TeamsResponse(BaseModel):
-    teams: list[TeamModel]
-    total: int
-    filtered: int
-
-
-class FreezeSummary(BaseModel):
-    frozenAt: str
-    frozenBy: str
-    shortlistCount: int
-    rejectedCount: int
-    overridesApplied: int
-    snapshotId: str
-
-
-class FreezeStatus(BaseModel):
-    isFrozen: bool
-    summary: Optional[FreezeSummary] = None
-
-
-class FreezeResponse(BaseModel):
-    success: bool
-    summary: FreezeSummary
-
-
-class FreezePayload(BaseModel):
-    shortlistSize: int
-    auditorId: str
-
-
-class OverridePayload(BaseModel):
-    overrideScore: float
-    auditorNote: str
-    auditorId: str
-
-
-class OverrideResponse(BaseModel):
-    success: bool
-    team: TeamModel
-
-
-class Pass1Bucket(BaseModel):
-    range: str
-    count: int
-
-
-class Pass1RecentActivity(BaseModel):
-    id: str
-    time: str
-    status: str
-    score: Optional[float] = None
-    band: Optional[str] = None
-
-
-class Pass1StatsResponse(BaseModel):
-    totalComplete: int
-    scoredCount: int
-    remainingCount: int
-    activeWorkers: int
-    idleWorkers: int
-    estimatedCost: float
-    meanScore: float
-    medianScore: float
-    bands: dict[str, int]
-    scoreBuckets: list[Pass1Bucket]
-    recentActivity: list[Pass1RecentActivity]
-
-
-class Pass2StreamProgress(BaseModel):
-    completed: int
-    total: int
-    percentage: int
-
-
-class Pass2StatsResponse(BaseModel):
-    promotedTotal: int
-    completed: int
-    running: int
-    queued: int
-    estimatedCost: float
-    streams: dict[str, Pass2StreamProgress]
-
-
-class DisputeItem(BaseModel):
-    id: str
-    teamId: str
-    teamName: str
-    projectTitle: str
-    currentScore: float
-    proposedScore: Optional[float] = None
-    band: str
-    reason: str
-    aiVerdictSummary: str
-    auditorId: Optional[str] = None
-    auditorNote: Optional[str] = None
-    status: str
-    createdAt: str
-
-
-class IncompleteTeamSummary(BaseModel):
-    id: str
-    name: str
-    reasons: list[str]
-
-
-class IngestResult(BaseModel):
-    dryRun: bool
-    rowsDetected: int
-    complete: int
-    incomplete: int
-    queuedForP1: int
-    incompleteList: list[IncompleteTeamSummary]
-
-
-class RunState(BaseModel):
-    id: str
-    status: str
-    startedAt: str
-    elapsedSeconds: int
-    totalTeams: int
-    completeTeams: int
-    incompleteTeams: int
-    p1Completed: int
-    p1Queued: int
-    p2Promoted: int
-    p2Completed: int
-    p2Running: int
-    p2Queued: int
-    shortlistSize: int
-    maxShortlistTarget: int
-    activeWorkers: int
-    totalWorkers: int
-    estimatedCost: float
-    p1Cost: float
-    p2Cost: float
-    budgetLimit: float
-    isBudgetKillSwitchTriggered: bool
-    frozenAt: Optional[str] = None
-    frozenBy: Optional[str] = None
-    currentStage: str
-
-
-class RestartPayload(BaseModel):
-    auditorId: Optional[str] = None
-
-
-# ============================================================================
-# Serializer Helpers
-# ============================================================================
-
-def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
-    """Ensure datetime is UTC-aware."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def format_iso_utc(dt: Optional[datetime]) -> Optional[str]:
-    """Format datetime as ISO-8601 UTC string with 'Z' suffix."""
-    if not dt:
-        return None
-    utc_dt = ensure_utc(dt)
-    return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def team_to_frontend(team: Team) -> TeamModel:
-    """Convert database Team model to frontend TeamModel shape."""
-    # Split project links
-    project_links = []
-    if team.project_links:
-        project_links = [link.strip() for link in team.project_links.split(",") if link.strip()]
-
-    # Pass-1 score and reasons
-    pass1_score = None
-    if team.p1_composite is not None:
-        reasons_dict = {}
-        if team.p1_reasons:
-            try:
-                raw_reasons = json.loads(team.p1_reasons)
-                if isinstance(raw_reasons, dict):
-                    for k, v in raw_reasons.items():
-                        # Remap "clarity" -> "problemClarity"
-                        if k == "clarity":
-                            reasons_dict["problemClarity"] = str(v)
-                        else:
-                            reasons_dict[k] = str(v)
-            except Exception:
-                pass
-
-        pass1_score = Pass1ScoreModel(
-            problemClarity=team.p1_problem_clarity or 0.0,
-            originality=team.p1_originality or 0.0,
-            execution=team.p1_execution or 0.0,
-            feasibility=team.p1_feasibility or 0.0,
-            articulation=team.p1_articulation or 0.0,
-            composite=team.p1_composite or 0.0,
-            reasons=reasons_dict,
-            track=team.track or "new_idea",
-            band=team.p1_band or "BORDERLINE",
-        )
-
-    # Pass-2 verdict
-    pass2_verdict = None
-    if team.p2_verdict:
-        try:
-            parsed = json.loads(team.p2_verdict)
-            if isinstance(parsed, list):
-                pass2_verdict = parsed
-            elif isinstance(parsed, str):
-                pass2_verdict = [parsed]
-        except Exception:
-            pass2_verdict = [team.p2_verdict]
-
-    # Critique
-    critique = None
-    if team.p2_critiques:
-        try:
-            critique = json.loads(team.p2_critiques)
-        except Exception:
-            pass
-
-    # Evidence links
-    evidence_links = None
-    if team.evidence_links:
-        try:
-            evidence_links = json.loads(team.evidence_links)
-        except Exception:
-            pass
-
-    # Integrity flags
-    integrity_flags = None
-    if team.integrity_flags:
-        try:
-            integrity_flags = json.loads(team.integrity_flags)
-        except Exception:
-            pass
-
-    # Incomplete reasons
-    incomplete_reasons = None
-    if team.status == TeamStatus.INCOMPLETE and team.error:
-        incomplete_reasons = [team.error]
-
-    return TeamModel(
-        id=team.team_id,
-        name=team.team_name or "",
-        theme=team.theme,
-        idea=team.idea or "",
-        track=team.track or "new_idea",
-        projectLinks=project_links,
-        memberCount=1,
-        status=team.status,
-        pass1=pass1_score,
-        pass2Score=team.p2_score,
-        pass2Verdict=pass2_verdict,
-        critique=critique,
-        evidenceLinks=evidence_links,
-        integrityFlags=integrity_flags,
-        finalRank=team.final_rank,
-        overrideScore=team.override_score,
-        auditorId=team.auditor_id,
-        auditorNote=team.auditor_note,
-        incompleteReasons=incomplete_reasons,
-        createdAt=format_iso_utc(team.created_at) or "",
-        updatedAt=format_iso_utc(team.updated_at) or "",
-    )
-
-
-def map_run_status(status: str) -> str:
-    """Map DB Run.status to Frontend RunStatus enum."""
-    if status == RunStatus.FROZEN:
-        return "FROZEN"
-    if status in (RunStatus.PASS1_RUNNING, RunStatus.PASS2_RUNNING):
-        return "RUNNING"
-    if status in (RunStatus.PASS1_DONE, RunStatus.PASS2_DONE):
-        return "COMPLETED"
-    if status in (RunStatus.PASS1_INCOMPLETE, RunStatus.INTERRUPTED):
-        return "FAILED"
-    return "IDLE"
-
-
-def map_current_stage(status: str) -> str:
-    """Map DB Run.status to Frontend currentStage enum."""
-    if status == RunStatus.FROZEN:
-        return "FROZEN"
-    if status == RunStatus.PASS1_RUNNING:
-        return "PASS_1"
-    if status == RunStatus.PASS2_RUNNING:
-        return "PASS_2"
-    if status == RunStatus.PASS1_DONE:
-        return "HUMAN_GATE"
-    if status == RunStatus.PASS2_DONE:
-        return "RANKING"
-    return "INGEST"
-
-
-def build_run_state(session: Session, run: Run) -> RunState:
-    """Build the frontend RunState response."""
-    # Query team counts
-    teams = session.exec(select(Team).where(Team.run_id == run.id)).all()
-    total_teams = len(teams)
-    complete_teams = len([t for t in teams if t.status != TeamStatus.INCOMPLETE])
-    incomplete_teams = total_teams - complete_teams
-
-    p1_completed = len([t for t in teams if t.p1_composite is not None])
-    p1_queued = len([t for t in teams if t.status == TeamStatus.P1_QUEUED])
-
-    p2_promoted = len([
-        t for t in teams
-        if t.p1_band in ("BORDERLINE", "FAST_TRACK") or t.status in (TeamStatus.P2_QUEUED, TeamStatus.P2_DONE, TeamStatus.SHORTLIST)
-    ])
-    p2_completed = len([t for t in teams if t.status in (TeamStatus.P2_DONE, TeamStatus.SHORTLIST) or t.p2_score is not None])
-    p2_running = 0
-    p2_queued = len([t for t in teams if t.status == TeamStatus.P2_QUEUED])
-
-    # Shortlist size
-    shortlist_size = run.shortlist_size if run.shortlist_size is not None else 50
-
-    # Timing
-    if run.created_at:
-        created_utc = ensure_utc(run.created_at)
-        elapsed_seconds = max(0, int((utcnow() - created_utc).total_seconds()))
-    else:
-        elapsed_seconds = 0
-
-    # Costs & workers
-    active_workers = 42 if run.status in (RunStatus.PASS1_RUNNING, RunStatus.PASS2_RUNNING) else 0
-    total_workers = 50
-    p1_cost = round(p1_completed * 0.04, 2)
-    p2_cost = round(p2_completed * 0.04, 2)
-    estimated_cost = round(p1_cost + p2_cost, 2)
-
-    return RunState(
-        id=f"run-{run.id}",
-        status=map_run_status(run.status),
-        startedAt=format_iso_utc(run.created_at) or "",
-        elapsedSeconds=elapsed_seconds,
-        totalTeams=total_teams,
-        completeTeams=complete_teams,
-        incompleteTeams=incomplete_teams,
-        p1Completed=p1_completed,
-        p1Queued=p1_queued,
-        p2Promoted=p2_promoted,
-        p2Completed=p2_completed,
-        p2Running=p2_running,
-        p2Queued=p2_queued,
-        shortlistSize=shortlist_size,
-        maxShortlistTarget=50,
-        activeWorkers=active_workers,
-        totalWorkers=total_workers,
-        estimatedCost=estimated_cost,
-        p1Cost=p1_cost,
-        p2Cost=p2_cost,
-        budgetLimit=20.00,
-        isBudgetKillSwitchTriggered=False,
-        frozenAt=format_iso_utc(run.frozen_at),
-        frozenBy=run.frozen_by,
-        currentStage=map_current_stage(run.status),
-    )
 
 
 # ============================================================================

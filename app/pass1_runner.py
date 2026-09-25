@@ -16,6 +16,13 @@ from app.models import Run, RunStatus, Team, TeamStatus, utcnow
 logger = logging.getLogger(__name__)
 
 
+def _normalize_score(score: dict) -> dict:
+    """Map the AI service's 'clarity' field to our 'problem_clarity' name."""
+    if "clarity" in score and "problem_clarity" not in score:
+        score["problem_clarity"] = score.pop("clarity")
+    return score
+
+
 def extract_github_url(project_links: str | None) -> str | None:
     """Extract the first GitHub URL from project_links."""
     if not project_links:
@@ -148,6 +155,7 @@ def score_teams_batch(session: Session, teams: list[Team]) -> tuple[list[str], l
     start = time.time()
     try:
         scores = ai_client.score_batch(team_inputs)
+        scores = [_normalize_score(s) for s in scores]
         duration = time.time() - start
         logger.info("score_batch(%d teams) completed in %.2fs", len(teams), duration)
     except AIServiceError as exc:
@@ -203,6 +211,7 @@ def score_team_individually(session: Session, team: Team) -> bool:
     start = time.time()
     try:
         score = ai_client.score_one(team_input)
+        score = _normalize_score(score)
         duration = time.time() - start
         logger.info("score_one(%s) completed in %.2fs", team.team_id, duration)
     except AIServiceError as exc:
